@@ -187,6 +187,21 @@ async function fetchAgg(): Promise<[Record<string, Record<string, number>>, stri
       throw new Error(`Aggregator API failed: ${response.status}`)
     }
 
+    const contentType = response.headers.get("content-type")
+    if (!contentType || !contentType.includes("application/json")) {
+      const textResponse = await response.text()
+      console.log("[v0] Non-JSON response from aggregator:", textResponse.substring(0, 100))
+
+      if (
+        textResponse.toLowerCase().includes("too many requests") ||
+        textResponse.toLowerCase().includes("rate limit")
+      ) {
+        throw new Error("Rate limited by aggregator API. Please try again later.")
+      }
+
+      throw new Error(`Aggregator returned non-JSON response: ${textResponse.substring(0, 100)}`)
+    }
+
     const data = await response.json()
     console.log("[v0] Aggregator response received")
 
@@ -275,7 +290,19 @@ async function fetchParadexLatestForBase(base: string, quotes: string[]): Promis
       })
 
       if (response.status === 404) continue
-      if (!response.ok) continue
+      if (!response.ok) {
+        if (response.status === 429) {
+          console.log("[v0] Rate limited by Paradex for", mkt)
+          continue
+        }
+        continue
+      }
+
+      const contentType = response.headers.get("content-type")
+      if (!contentType || !contentType.includes("application/json")) {
+        console.log("[v0] Non-JSON response from Paradex for", mkt)
+        continue
+      }
 
       const data = await response.json()
       const rate = extractParadexLatest(data)
@@ -337,7 +364,6 @@ async function fetchParadexBatch(bases: string[], quotes: string[], batchSize = 
 export async function GET() {
   try {
     if (process.env.NODE_ENV === "production" && process.env.VERCEL !== "1") {
-      // Return sample data for Firebase static hosting
       const sampleData: FundingData = {
         BTC: { Hyperliquid: 0.0001, Lighter: 0.00012, Paradex: 0.00015 },
         ETH: { Hyperliquid: 0.0002, Lighter: 0.00018, Paradex: 0.00022 },
@@ -346,40 +372,47 @@ export async function GET() {
         LINK: { Hyperliquid: 0.0002, Lighter: 0.00019, Paradex: 0.00021 },
       }
 
-      return NextResponse.json({
-        data: sampleData,
-        timestamp: new Date().toISOString(),
-        totalAssets: Object.keys(sampleData).length,
-        note: "Sample data - Deploy to Vercel for real-time data",
-      })
+      return NextResponse.json(sampleData)
     }
 
     console.log("[v0] Starting funding fees collection")
 
-    // 1) Fetch Hyperliquid + Lighter data
-    const [byBase, basesLighter] = await fetchAgg()
+    let retryCount = 0
+    const maxRetries = 3
 
-    // 2) Fetch Paradex data in parallel batches
-    const quotes = ["USD", "USDC"]
-    const allBases = basesLighter
+    while (retryCount < maxRetries) {
+      try {
+        // 1) Fetch Hyperliquid + Lighter data
+        const [byBase, basesLighter] = await fetchAgg()
 
-    console.log(`[v0] Fetching Paradex data for ${allBases.length} assets in parallel batches`)
-    const paradexResults = await fetchParadexBatch(allBases, quotes, 10) // Process 10 at a time
+        // 2) Fetch Paradex data in parallel batches
+        const quotes = ["USD", "USDC"]
+        const allBases = basesLighter
 
-    // 3) Merge Paradex results
-    for (const [base, rate] of Object.entries(paradexResults)) {
-      if (!byBase[base]) byBase[base] = {}
-      byBase[base]["Paradex"] = rate
+        console.log(`[v0] Fetching Paradex data for ${allBases.length} assets in parallel batches`)
+        const paradexResults = await fetchParadexBatch(allBases, quotes, 5) // Reduced batch size to avoid rate limits
+
+        // 3) Merge Paradex results
+        for (const [base, rate] of Object.entries(paradexResults)) {
+          if (!byBase[base]) byBase[base] = {}
+          byBase[base]["Paradex"] = rate
+        }
+
+        console.log("[v0] Successfully collected funding data for", Object.keys(byBase).length, "assets")
+        return NextResponse.json(byBase)
+      } catch (error) {
+        if (error instanceof Error && error.message.includes("Rate limited")) {
+          retryCount++
+          if (retryCount < maxRetries) {
+            const delay = Math.pow(2, retryCount) * 1000 // Exponential backoff: 2s, 4s, 8s
+            console.log(`[v0] Rate limited, retrying in ${delay}ms (attempt ${retryCount}/${maxRetries})`)
+            await new Promise((resolve) => setTimeout(resolve, delay))
+            continue
+          }
+        }
+        throw error
+      }
     }
-
-    const response: ApiResponse = {
-      data: byBase,
-      timestamp: new Date().toISOString(),
-      totalAssets: Object.keys(byBase).length,
-    }
-
-    console.log("[v0] Successfully collected funding data for", response.totalAssets, "assets")
-    return NextResponse.json(response)
   } catch (error) {
     console.error("[v0] API route error:", error)
     return NextResponse.json(
