@@ -256,7 +256,7 @@ export default function FundingFeesPage() {
                 </div>
                 <Progress value={loadingProgress} className="h-2" />
                 <p className="text-xs text-muted-foreground">
-                  1h Funding
+                  1h Funding Rate
                 </p>
               </div>
             </CardContent>
