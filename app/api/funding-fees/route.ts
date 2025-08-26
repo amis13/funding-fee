@@ -47,10 +47,11 @@ function baseFromSymbol(symbol: string): string {
 }
 
 // --- Normalización por plataforma (todo a %/hr) ---
+// ⚠️ Ahora Hyperliquid y Lighter vienen x8 → dividimos entre 8
 const PERIOD_HOURS: Record<string, number> = {
-  Hyperliquid: 1,
-  Lighter: 1, // UI muestra por hora
-  Paradex: 8, // UI muestra 8h
+  Hyperliquid: 8, // <- cambiado a 8
+  Lighter: 8,
+  Paradex: 8,     // la UI muestra 8h; luego lo normalizamos a 1h en extract
 }
 const normalizePerHour = (plat: string, rate: number | null) =>
   rate == null ? null : rate / (PERIOD_HOURS[plat] ?? 1)
@@ -322,7 +323,7 @@ export async function GET() {
   try {
     console.log("[v0] Starting funding fees collection")
 
-    // 1) Hyperliquid + Lighter del agregador
+    // 1) Hyperliquid + Lighter del agregador (ambos ÷ 8)
     const [byBase, basesLighter] = await fetchAgg()
 
     // 2) Paradex en lotes (normalizado a /hr en extract)
@@ -335,8 +336,7 @@ export async function GET() {
     for (const [base, rate] of Object.entries(paradexResults)) {
       if (rate == null) continue
       if (!byBase[base]) byBase[base] = {}
-      // (ya es /hr)
-      byBase[base]["Paradex"] = rate
+      byBase[base]["Paradex"] = rate // ya es /hr
     }
 
     const response: ApiResponse = {
