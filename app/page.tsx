@@ -7,7 +7,6 @@ import { Button } from "@/components/ui/button"
 import { Progress } from "@/components/ui/progress"
 import { RefreshCw, TrendingUp, TrendingDown, Clock, Zap } from "lucide-react"
 
-
 interface FundingData {
   [asset: string]: {
     Hyperliquid?: number
@@ -33,12 +32,11 @@ interface ErrorResponse {
    ========================= */
 
 type Venue = "Hyperliquid" | "Lighter" | "Paradex"
+const VENUES: Venue[] = ["Hyperliquid", "Lighter", "Paradex"]
 
 // Si alguna venue usa tickers distintos, mapea aquí
 const SYMBOL_MAP: Partial<Record<Venue, Record<string, string>>> = {
-  // Ejemplos:
   // Hyperliquid: { PEPE: "1000PEPE", SHIB: "1000SHIB" },
-  // Paradex:     { WIF: "WIF" },
 }
 
 const toVenueSymbol = (venue: Venue, base: string) =>
@@ -48,12 +46,10 @@ const buildTradeLink = (venue: Venue, base: string): string | null => {
   const b = encodeURIComponent(toVenueSymbol(venue, base).toUpperCase().trim())
   switch (venue) {
     case "Hyperliquid":
-      // También sirve /perp/{BASE}
       return `https://app.hyperliquid.xyz/trade/${b}`
     case "Lighter":
       return `https://app.lighter.xyz/trade/${b}`
     case "Paradex":
-      // Paradex necesita el MARKET completo
       return `https://app.paradex.trade/trade/${b}-USD-PERP`
     default:
       return null
@@ -88,7 +84,6 @@ function FundingCell({
     </div>
   )
 
-  // Si no hay dato o no hay link, solo texto (no clicable)
   if (rate == null || Number.isNaN(rate) || !href) {
     return content
   }
@@ -197,18 +192,21 @@ export default function FundingFeesPage() {
     return () => clearInterval(interval)
   }, [])
 
+  // ===== formatters =====
   const formatPercentage = (value: number | undefined): string => {
     if (value === undefined || value === null || isNaN(value)) return "—"
     return `${(value * 100).toFixed(4)}%`
   }
-
+  const formatBps = (value: number | undefined): string => {
+    if (value === undefined || value === null || isNaN(value)) return "—"
+    return `${(value * 10000).toFixed(1)} bps`
+  }
   const getPercentageColor = (value: number | undefined): string => {
     if (value === undefined || value === null || isNaN(value)) return "text-muted-foreground"
     if (value > 0) return "text-green-600 dark:text-green-400"
     if (value < 0) return "text-red-600 dark:text-red-400"
     return "text-muted-foreground"
   }
-
   const getPercentageIcon = (value: number | undefined) => {
     if (value === undefined || value === null || isNaN(value)) return null
     if (value > 0) return <TrendingUp className="h-3 w-3" />
@@ -218,6 +216,62 @@ export default function FundingFeesPage() {
 
   const sortedAssets = Object.keys(fundingData).sort()
 
+  // ===== TOP 5: mayor discrepancia entre venues (max - min), priorizando signos opuestos
+  type TopRow = {
+    asset: string
+    minVenue: Venue
+    minRate: number
+    maxVenue: Venue
+    maxRate: number
+    spread: number
+    signFlip: boolean
+  }
+
+  const topRows: TopRow[] = (() => {
+    const rows: TopRow[] = []
+
+    for (const asset of sortedAssets) {
+      const rates = fundingData[asset]
+      if (!rates) continue
+
+      // colecciona rates válidos
+      const pairs = VENUES.flatMap((v) => {
+        const r = rates[v]
+        return r === null || r === undefined || Number.isNaN(r) ? [] : ([[v, r]] as [Venue, number][])
+      })
+      if (pairs.length < 2) continue
+
+      // min y max por venue
+      let minV = pairs[0][0], minR = pairs[0][1]
+      let maxV = pairs[0][0], maxR = pairs[0][1]
+      for (const [v, r] of pairs) {
+        if (r < minR) { minR = r; minV = v }
+        if (r > maxR) { maxR = r; maxV = v }
+      }
+
+      const spread = Math.abs(maxR - minR)
+      const signFlip = minR < 0 && maxR > 0
+
+      rows.push({
+        asset,
+        minVenue: minV,
+        minRate: minR,
+        maxVenue: maxV,
+        maxRate: maxR,
+        spread,
+        signFlip,
+      })
+    }
+
+    // ordena: primero con signos opuestos, luego por spread desc
+    rows.sort((a, b) => {
+      const flipDiff = Number(b.signFlip) - Number(a.signFlip)
+      return flipDiff !== 0 ? flipDiff : b.spread - a.spread
+    })
+
+    return rows.slice(0, 5)
+  })()
+
   return (
     <div className="container mx-auto p-6 space-y-6">
       <div className="flex flex-col space-y-4">
@@ -225,7 +279,7 @@ export default function FundingFeesPage() {
           <div>
             <h1 className="text-3xl font-bold tracking-tight">Funding Fees Dashboard</h1>
             <p className="text-muted-foreground">Real-time funding rates across Hyperliquid, Lighter, and Paradex</p>
-            <br></br>
+            <br />
           </div>
           <Button onClick={fetchFundingData} disabled={loading} variant="outline" size="sm">
             <RefreshCw className={`h-4 w-4 mr-2 ${loading ? "animate-spin" : ""}`} />
@@ -255,14 +309,94 @@ export default function FundingFeesPage() {
                   <span className="text-muted-foreground">{Math.round(loadingProgress)}%</span>
                 </div>
                 <Progress value={loadingProgress} className="h-2" />
-                <p className="text-xs text-muted-foreground">
-                  1h Funding Rate
-                </p>
+                <p className="text-xs text-muted-foreground">1h Funding Rate</p>
               </div>
             </CardContent>
           </Card>
         )}
       </div>
+
+      {/* ===== TOP 5 DISCREPANCIAS ===== */}
+      {!loading && topRows.length > 0 && (
+        <Card>
+          <CardHeader>
+            <CardTitle>Top 5 cross-venue discrepancies</CardTitle>
+            <CardDescription>
+              Activos con mayor diferencia de funding entre plataformas (priorizando signos opuestos para delta-neutral).
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <div className="overflow-x-auto">
+              <table className="w-full">
+                <thead>
+                  <tr className="border-b">
+                    <th className="text-left py-3 px-4 font-semibold">Asset</th>
+                    <th className="text-left py-3 px-4 font-semibold">Long @</th>
+                    <th className="text-left py-3 px-4 font-semibold">Short @</th>
+                    <th className="text-left py-3 px-4 font-semibold">Rates (min / max)</th>
+                    <th className="text-left py-3 px-4 font-semibold">Spread</th>
+                    <th className="text-left py-3 px-4 font-semibold">Signal</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {topRows.map((row) => {
+                    const longVenue = row.minRate < 0 ? row.minVenue : null
+                    const shortVenue = row.maxRate > 0 ? row.maxVenue : null
+                    return (
+                      <tr key={row.asset} className="border-b hover:bg-muted/50">
+                        <td className="py-3 px-4 font-medium">{row.asset}</td>
+                        <td className="py-3 px-4">
+                          {longVenue ? (
+                            <a
+                              className="underline-offset-2 hover:underline"
+                              href={buildTradeLink(longVenue, row.asset) ?? undefined}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                            >
+                              {longVenue}
+                            </a>
+                          ) : (
+                            "—"
+                          )}
+                        </td>
+                        <td className="py-3 px-4">
+                          {shortVenue ? (
+                            <a
+                              className="underline-offset-2 hover:underline"
+                              href={buildTradeLink(shortVenue, row.asset) ?? undefined}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                            >
+                              {shortVenue}
+                            </a>
+                          ) : (
+                            "—"
+                          )}
+                        </td>
+                        <td className="py-3 px-4">
+                          {formatPercentage(row.minRate)} / {formatPercentage(row.maxRate)}
+                        </td>
+                        <td className="py-3 px-4">{formatBps(row.spread)}</td>
+                        <td className="py-3 px-4">
+                          {row.signFlip ? (
+                            <Badge variant="default">Opposite signs</Badge>
+                          ) : (
+                            <Badge variant="outline">Same sign</Badge>
+                          )}
+                        </td>
+                      </tr>
+                    )
+                  })}
+                </tbody>
+              </table>
+            </div>
+            <p className="mt-3 text-xs text-muted-foreground">
+              Sugerencia: <strong>Long</strong> donde el funding es negativo y <strong>Short</strong> donde es positivo.
+              Verifica liquidez, fees y límites de borrow antes de ejecutar cualquier estrategia.
+            </p>
+          </CardContent>
+        </Card>
+      )}
 
       {error && (
         <Card className="border-destructive">
