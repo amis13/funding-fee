@@ -299,11 +299,11 @@ export default function FundingFeesPage() {
           {totalAssets > 0 && <Badge variant="outline">{totalAssets} assets</Badge>}
           <Badge variant="outline" className="flex items-center gap-1">
             <Clock className="h-3 w-3" />
-            Auto-refresh: Every hour
+            1h Funding Fees
           </Badge>
           <Badge variant="outline" className="flex items-center gap-1">
             <Zap className="h-3 w-3" />
-            Optimized parallel loading
+            Current rate
           </Badge>
         </div>
 
@@ -316,7 +316,7 @@ export default function FundingFeesPage() {
                   <span className="text-muted-foreground">{Math.round(loadingProgress)}%</span>
                 </div>
                 <Progress value={loadingProgress} className="h-2" />
-                <p className="text-xs text-muted-foreground">1h Funding Rate</p>
+                <p className="text-xs text-muted-foreground">Loading 1h Funding Rates...</p>
               </div>
             </CardContent>
           </Card>
