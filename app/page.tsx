@@ -216,6 +216,10 @@ export default function FundingFeesPage() {
 
   const sortedAssets = Object.keys(fundingData).sort()
 
+  // ===== Annualización =====
+  const HOURS_PER_YEAR = 24 * 365
+  const toAPY = (hourly: number) => Math.pow(1 + hourly, HOURS_PER_YEAR) - 1
+
   // ===== TOP 5: mayor discrepancia entre venues (max - min), priorizando signos opuestos
   type TopRow = {
     asset: string
@@ -225,6 +229,7 @@ export default function FundingFeesPage() {
     maxRate: number
     spread: number
     signFlip: boolean
+    apy?: number // APY delta-neutral basado en spread (si hay sign flip)
   }
 
   const topRows: TopRow[] = (() => {
@@ -251,6 +256,7 @@ export default function FundingFeesPage() {
 
       const spread = Math.abs(maxR - minR)
       const signFlip = minR < 0 && maxR > 0
+      const apy = signFlip ? toAPY(spread) : undefined
 
       rows.push({
         asset,
@@ -260,6 +266,7 @@ export default function FundingFeesPage() {
         maxRate: maxR,
         spread,
         signFlip,
+        apy,
       })
     }
 
@@ -281,7 +288,7 @@ export default function FundingFeesPage() {
             <p className="text-muted-foreground">Real-time funding rates across Hyperliquid, Lighter, and Paradex</p>
             <br />
           </div>
-          <Button onClick={fetchFundingData} disabled={loading} variant="outline" size="sm">
+        <Button onClick={fetchFundingData} disabled={loading} variant="outline" size="sm">
             <RefreshCw className={`h-4 w-4 mr-2 ${loading ? "animate-spin" : ""}`} />
             Refresh
           </Button>
@@ -292,11 +299,11 @@ export default function FundingFeesPage() {
           {totalAssets > 0 && <Badge variant="outline">{totalAssets} assets</Badge>}
           <Badge variant="outline" className="flex items-center gap-1">
             <Clock className="h-3 w-3" />
-            1h Funding Rate
+            Auto-refresh: Every hour
           </Badge>
           <Badge variant="outline" className="flex items-center gap-1">
             <Zap className="h-3 w-3" />
-            Current instant rate
+            Optimized parallel loading
           </Badge>
         </div>
 
@@ -309,7 +316,7 @@ export default function FundingFeesPage() {
                   <span className="text-muted-foreground">{Math.round(loadingProgress)}%</span>
                 </div>
                 <Progress value={loadingProgress} className="h-2" />
-                <p className="text-xs text-muted-foreground">Loading 1h Funding Rates...</p>
+                <p className="text-xs text-muted-foreground">1h Funding Rate</p>
               </div>
             </CardContent>
           </Card>
@@ -322,7 +329,7 @@ export default function FundingFeesPage() {
           <CardHeader>
             <CardTitle>Top 5 cross-venue discrepancies</CardTitle>
             <CardDescription>
-              Assets with the largest funding difference between platforms (prioritizing opposite signs for delta-neutral).
+              Assets with the largest funding-rate gap across venues (prioritizing opposite signs for delta-neutral).
             </CardDescription>
           </CardHeader>
           <CardContent>
@@ -335,6 +342,7 @@ export default function FundingFeesPage() {
                     <th className="text-left py-3 px-4 font-semibold">Short @</th>
                     <th className="text-left py-3 px-4 font-semibold">Rates (min / max)</th>
                     <th className="text-left py-3 px-4 font-semibold">Spread</th>
+                    <th className="text-left py-3 px-4 font-semibold">APY (Δ-neutral)</th>
                     <th className="text-left py-3 px-4 font-semibold">Signal</th>
                   </tr>
                 </thead>
@@ -377,6 +385,9 @@ export default function FundingFeesPage() {
                           {formatPercentage(row.minRate)} / {formatPercentage(row.maxRate)}
                         </td>
                         <td className="py-3 px-4">{formatBps(row.spread)}</td>
+                        <td className="py-3 px-4">
+                          {row.apy !== undefined ? formatPercentage(row.apy) : "—"}
+                        </td>
                         <td className="py-3 px-4">
                           {row.signFlip ? (
                             <Badge variant="default">Opposite signs</Badge>
