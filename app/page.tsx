@@ -1,11 +1,12 @@
 "use client"
-
+import type { ReactNode } from "react";
 import { useState, useEffect } from "react"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Progress } from "@/components/ui/progress"
 import { RefreshCw, TrendingUp, TrendingDown, Clock, Zap } from "lucide-react"
+
 
 interface FundingData {
   [asset: string]: {
@@ -27,6 +28,85 @@ interface ErrorResponse {
   stdout?: string
 }
 
+/* =========================
+   Helpers de enlaces
+   ========================= */
+
+type Venue = "Hyperliquid" | "Lighter" | "Paradex"
+
+// Si alguna venue usa tickers distintos, mapea aquí
+const SYMBOL_MAP: Partial<Record<Venue, Record<string, string>>> = {
+  // Ejemplos:
+  // Hyperliquid: { PEPE: "1000PEPE", SHIB: "1000SHIB" },
+  // Paradex:     { WIF: "WIF" },
+}
+
+const toVenueSymbol = (venue: Venue, base: string) =>
+  SYMBOL_MAP[venue]?.[base] ?? base
+
+const buildTradeLink = (venue: Venue, base: string): string | null => {
+  const b = encodeURIComponent(toVenueSymbol(venue, base).toUpperCase().trim())
+  switch (venue) {
+    case "Hyperliquid":
+      // También sirve /perp/{BASE}
+      return `https://app.hyperliquid.xyz/trade/${b}`
+    case "Lighter":
+      return `https://app.lighter.xyz/trade/${b}`
+    case "Paradex":
+      // Paradex necesita el MARKET completo
+      return `https://app.paradex.trade/trade/${b}-USD-PERP`
+    default:
+      return null
+  }
+}
+
+/* =========================
+   Componente FundingCell
+   ========================= */
+
+function FundingCell({
+  venue,
+  base,
+  rate,
+  formatPercentage,
+  getPercentageColor,
+  getPercentageIcon,
+}: {
+  venue: Venue
+  base: string
+  rate?: number | null
+  formatPercentage: (v: number | undefined) => string
+  getPercentageColor: (v: number | undefined) => string
+  getPercentageIcon: (v: number | undefined) => ReactNode
+}) {
+  const href = buildTradeLink(venue, base)
+  const color = getPercentageColor(rate ?? undefined)
+  const content = (
+    <div className={`flex items-center space-x-1 ${color}`}>
+      {getPercentageIcon(rate ?? undefined)}
+      <span>{formatPercentage(rate ?? undefined)}</span>
+    </div>
+  )
+
+  // Si no hay dato o no hay link, solo texto (no clicable)
+  if (rate == null || Number.isNaN(rate) || !href) {
+    return content
+  }
+
+  return (
+    <a
+      href={href}
+      target="_blank"
+      rel="noopener noreferrer"
+      className="underline-offset-2 hover:underline"
+      title={`Abrir ${base} en ${venue}`}
+      aria-label={`Abrir ${base} en ${venue}`}
+    >
+      {content}
+    </a>
+  )
+}
+
 export default function FundingFeesPage() {
   const [fundingData, setFundingData] = useState<FundingData>({})
   const [lastUpdate, setLastUpdate] = useState<string>("")
@@ -44,22 +124,14 @@ export default function FundingFeesPage() {
       setErrorDetails("")
       setLoadingProgress(0)
       setLoadingStatus("Initializing...")
-      console.log("[v0] Starting fetch request to /api/funding-fees")
-
       const progressInterval = setInterval(() => {
         setLoadingProgress((prev) => {
           if (prev < 90) {
             const increment = Math.random() * 10 + 5
             const newProgress = Math.min(prev + increment, 90)
-
-            if (newProgress < 30) {
-              setLoadingStatus("Fetching Hyperliquid & Lighter data...")
-            } else if (newProgress < 80) {
-              setLoadingStatus("Processing Paradex data in parallel...")
-            } else {
-              setLoadingStatus("Finalizing results...")
-            }
-
+            if (newProgress < 30) setLoadingStatus("Fetching Hyperliquid & Lighter data...")
+            else if (newProgress < 80) setLoadingStatus("Processing Paradex data in parallel...")
+            else setLoadingStatus("Finalizing results...")
             return newProgress
           }
           return prev
@@ -67,124 +139,78 @@ export default function FundingFeesPage() {
       }, 200)
 
       const response = await fetch("/api/funding-fees")
-      console.log("[v0] Response status:", response.status)
-      console.log("[v0] Response headers:", Object.fromEntries(response.headers.entries()))
-
       const contentType = response.headers.get("content-type")
-      console.log("[v0] Content-Type:", contentType)
 
       if (!response.ok) {
         clearInterval(progressInterval)
         let errorData: ErrorResponse
         try {
-          if (contentType && contentType.includes("application/json")) {
-            errorData = await response.json()
-          } else {
-            const textResponse = await response.text()
-            console.log("[v0] Non-JSON error response:", textResponse)
-            errorData = {
-              error: `HTTP ${response.status}`,
-              details: textResponse.substring(0, 500),
-            }
-          }
-        } catch (parseError) {
-          console.log("[v0] Failed to parse error response:", parseError)
-          const textResponse = await response.text()
-          errorData = {
-            error: `HTTP ${response.status}`,
-            details: textResponse.substring(0, 500),
-          }
+          errorData = contentType?.includes("application/json")
+            ? await response.json()
+            : { error: `HTTP ${response.status}`, details: (await response.text()).slice(0, 500) }
+        } catch {
+          errorData = { error: `HTTP ${response.status}`, details: (await response.text()).slice(0, 500) }
         }
-
-        console.log("[v0] Error response:", errorData)
         setError(errorData.error || `HTTP error! status: ${response.status}`)
         setErrorDetails(errorData.details || "")
         throw new Error(`HTTP error! status: ${response.status}`)
       }
 
-      console.log("[v0] Response is OK, starting to parse JSON...")
       let result: ApiResponse
       try {
-        if (contentType && contentType.includes("application/json")) {
-          console.log("[v0] Parsing JSON response...")
+        if (contentType?.includes("application/json")) {
           result = await response.json()
-          console.log("[v0] JSON parsed successfully, data keys:", Object.keys(result))
-          console.log("[v0] Data object keys count:", Object.keys(result.data || {}).length)
         } else {
           clearInterval(progressInterval)
-          const textResponse = await response.text()
-          console.log("[v0] Non-JSON success response:", textResponse)
-          throw new Error("Server returned non-JSON response: " + textResponse.substring(0, 200))
+          throw new Error("Server returned non-JSON response")
         }
       } catch (parseError) {
         clearInterval(progressInterval)
-        console.log("[v0] Failed to parse success response:", parseError)
-        throw new Error("Failed to parse server response: " + parseError)
+        throw parseError
       }
 
       clearInterval(progressInterval)
       setLoadingProgress(100)
       setLoadingStatus("Complete!")
 
-      console.log("[v0] Setting state with parsed data...")
-      console.log("[v0] Result data type:", typeof result.data)
-      console.log("[v0] Result data is object:", result.data && typeof result.data === "object")
-
-      if (!result.data || typeof result.data !== "object") {
-        throw new Error("Invalid data format received from server")
-      }
-
       setFundingData(result.data)
-      setLastUpdate(result.timestamp || new Date().toISOString())
-      setTotalAssets(result.totalAssets || Object.keys(result.data).length)
-
-      console.log("[v0] State updated successfully!")
+      setLastUpdate(result.timestamp)
+      setTotalAssets(result.totalAssets)
 
       setTimeout(() => {
         setLoadingProgress(0)
         setLoadingStatus("")
       }, 1000)
     } catch (err) {
-      console.log("[v0] Caught error in fetchFundingData:", err)
       const errorMessage = err instanceof Error ? err.message : "Error fetching data"
       setError(errorMessage)
-      console.error("[v0] Error fetching funding data:", err)
       setLoadingProgress(0)
       setLoadingStatus("")
     } finally {
       setLoading(false)
-      console.log("[v0] fetchFundingData completed, loading set to false")
     }
   }
 
   useEffect(() => {
     fetchFundingData()
-
     const interval = setInterval(fetchFundingData, 3600000)
-
     return () => clearInterval(interval)
   }, [])
 
   const formatPercentage = (value: number | undefined): string => {
-    if (value === undefined || value === null || isNaN(value)) {
-      return "—"
-    }
+    if (value === undefined || value === null || isNaN(value)) return "—"
     return `${(value * 100).toFixed(4)}%`
   }
 
   const getPercentageColor = (value: number | undefined): string => {
-    if (value === undefined || value === null || isNaN(value)) {
-      return "text-muted-foreground"
-    }
+    if (value === undefined || value === null || isNaN(value)) return "text-muted-foreground"
     if (value > 0) return "text-green-600 dark:text-green-400"
     if (value < 0) return "text-red-600 dark:text-red-400"
     return "text-muted-foreground"
   }
 
   const getPercentageIcon = (value: number | undefined) => {
-    if (value === undefined || value === null || isNaN(value)) {
-      return null
-    }
+    if (value === undefined || value === null || isNaN(value)) return null
     if (value > 0) return <TrendingUp className="h-3 w-3" />
     if (value < 0) return <TrendingDown className="h-3 w-3" />
     return null
@@ -199,6 +225,7 @@ export default function FundingFeesPage() {
           <div>
             <h1 className="text-3xl font-bold tracking-tight">Funding Fees Dashboard</h1>
             <p className="text-muted-foreground">Real-time funding rates across Hyperliquid, Lighter, and Paradex</p>
+            <br></br>
           </div>
           <Button onClick={fetchFundingData} disabled={loading} variant="outline" size="sm">
             <RefreshCw className={`h-4 w-4 mr-2 ${loading ? "animate-spin" : ""}`} />
@@ -270,9 +297,9 @@ export default function FundingFeesPage() {
                 <thead>
                   <tr className="border-b">
                     <th className="text-left py-3 px-4 font-semibold">Asset</th>
-                    <th className="text-left py-3 px-4 font-semibold">Hyperliquid/hr</th>
-                    <th className="text-left py-3 px-4 font-semibold">Lighter/hr</th>
-                    <th className="text-left py-3 px-4 font-semibold">Paradex/hr</th>
+                    <th className="text-left py-3 px-4 font-semibold">Hyperliquid</th>
+                    <th className="text-left py-3 px-4 font-semibold">Lighter</th>
+                    <th className="text-left py-3 px-4 font-semibold">Paradex</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -281,23 +308,38 @@ export default function FundingFeesPage() {
                     return (
                       <tr key={asset} className="border-b hover:bg-muted/50">
                         <td className="py-3 px-4 font-medium">{asset}</td>
-                        <td className={`py-3 px-4 ${getPercentageColor(rates.Hyperliquid)}`}>
-                          <div className="flex items-center space-x-1">
-                            {getPercentageIcon(rates.Hyperliquid)}
-                            <span>{formatPercentage(rates.Hyperliquid)}</span>
-                          </div>
+
+                        <td className="py-3 px-4">
+                          <FundingCell
+                            venue="Hyperliquid"
+                            base={asset}
+                            rate={rates.Hyperliquid}
+                            formatPercentage={formatPercentage}
+                            getPercentageColor={getPercentageColor}
+                            getPercentageIcon={getPercentageIcon}
+                          />
                         </td>
-                        <td className={`py-3 px-4 ${getPercentageColor(rates.Lighter)}`}>
-                          <div className="flex items-center space-x-1">
-                            {getPercentageIcon(rates.Lighter)}
-                            <span>{formatPercentage(rates.Lighter)}</span>
-                          </div>
+
+                        <td className="py-3 px-4">
+                          <FundingCell
+                            venue="Lighter"
+                            base={asset}
+                            rate={rates.Lighter}
+                            formatPercentage={formatPercentage}
+                            getPercentageColor={getPercentageColor}
+                            getPercentageIcon={getPercentageIcon}
+                          />
                         </td>
-                        <td className={`py-3 px-4 ${getPercentageColor(rates.Paradex)}`}>
-                          <div className="flex items-center space-x-1">
-                            {getPercentageIcon(rates.Paradex)}
-                            <span>{formatPercentage(rates.Paradex)}</span>
-                          </div>
+
+                        <td className="py-3 px-4">
+                          <FundingCell
+                            venue="Paradex"
+                            base={asset}
+                            rate={rates.Paradex}
+                            formatPercentage={formatPercentage}
+                            getPercentageColor={getPercentageColor}
+                            getPercentageIcon={getPercentageIcon}
+                          />
                         </td>
                       </tr>
                     )
