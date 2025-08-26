@@ -1,7 +1,7 @@
 // app/api/funding/route.ts
 import { NextResponse } from "next/server"
 
-// 👇 Fuerza ejecución en runtime Node, sin ISR ni caché (prod y dev)
+// Fuerza ejecución dinámica en prod (sin ISR/caché)
 export const runtime = "nodejs"
 export const dynamic = "force-dynamic"
 export const revalidate = 0
@@ -24,30 +24,20 @@ interface ApiResponse {
 const API_AGG = "https://mainnet.zklighter.elliot.ai/api/v1/funding-rates"
 const PARADEX_URL = "https://api.prod.paradex.trade/v1/funding/data?market={market}"
 
-// Utility functions converted from Python
+// --- Utils ---
 function cleanAlnum(s: string): string {
   return s.replace(/[^a-zA-Z0-9]/g, "").toLowerCase()
 }
 
 function coerceRate(val: any): number | null {
   if (val === null || val === undefined) return null
-
-  try {
-    let x = Number.parseFloat(val)
-    if (isNaN(x)) return null
-
-    // If it's a percentage (1..100), convert to decimal
-    if (1.0 < Math.abs(x) && Math.abs(x) <= 100.0) {
-      x = x / 100.0
-    }
-
-    // Discard rates > 50%/h (probably invalid)
-    if (Math.abs(x) > 0.5) return null
-
-    return x
-  } catch {
-    return null
-  }
+  const x = Number.parseFloat(val)
+  if (Number.isNaN(x)) return null
+  // Si viene en %, pásalo a decimal
+  const y = 1.0 < Math.abs(x) && Math.abs(x) <= 100.0 ? x / 100.0 : x
+  // Filtra outliers absurdos (>50%/h)
+  if (Math.abs(y) > 0.5) return null
+  return y
 }
 
 function baseFromSymbol(symbol: string): string {
@@ -56,7 +46,16 @@ function baseFromSymbol(symbol: string): string {
   return parts[0] || s || "?"
 }
 
-// Platform mapping
+// --- Normalización por plataforma (todo a %/hr) ---
+const PERIOD_HOURS: Record<string, number> = {
+  Hyperliquid: 1,
+  Lighter: 1, // UI muestra por hora
+  Paradex: 8, // UI muestra 8h
+}
+const normalizePerHour = (plat: string, rate: number | null) =>
+  rate == null ? null : rate / (PERIOD_HOURS[plat] ?? 1)
+
+// --- Heurísticas de parseo ---
 const PLAT_MAP: Record<string, string> = {
   lighter: "Lighter",
   zklighter: "Lighter",
@@ -64,50 +63,76 @@ const PLAT_MAP: Record<string, string> = {
   hyperliquidv2: "Hyperliquid",
   hyper: "Hyperliquid",
 }
-
 const PLATFORM_KEYS = ["platform", "exchange", "venue", "source", "provider", "dex", "market_provider"]
 const SYMBOL_KEYS = ["symbol", "market", "pair", "name", "base", "asset", "coin", "ticker"]
 const FUND_KEYS = ["funding_rate", "fundingrate", "hourlyfundingrate", "predictedfundingrate", "rate", "value"]
 
 function normPlatformLabel(raw: string | null): string | null {
   if (!raw) return null
-
   const key = cleanAlnum(raw)
   if (key in PLAT_MAP) return PLAT_MAP[key]
+  for (const [k, v] of Object.entries(PLAT_MAP)) if (key.includes(k)) return v
+  return null
+}
+function isProbableSymbolKey(k: string): boolean {
+  return SYMBOL_KEYS.some((x) => k.toLowerCase().includes(x))
+}
+function isProbablePlatformKey(k: string): boolean {
+  return PLATFORM_KEYS.some((x) => k.toLowerCase().includes(x))
+}
+function isProbableRateKey(k: string): boolean {
+  const kLower = k.toLowerCase()
+  return FUND_KEYS.some((x) => kLower.includes(x)) || (kLower.includes("fund") && !kLower.includes("index") && !kLower.includes("time"))
+}
 
-  for (const [k, v] of Object.entries(PLAT_MAP)) {
-    if (key.includes(k)) return v
+// Prioriza campos instantáneos/por hora sobre predicted
+function pickRate(obj: any): number | null {
+  if (!obj || typeof obj !== "object") return null
+
+  // 1) Preferidos (lo que suele mostrar la UI por hora)
+  const preferred = [
+    "intrFunding",
+    "instantFunding",
+    "currentFunding",
+    "hourlyFundingRate",
+    "funding_rate_hour",
+    "fundingRateHour",
+    "hourly_funding_rate",
+  ]
+  for (const k of Object.keys(obj)) {
+    if (preferred.includes(k)) {
+      const r = coerceRate((obj as any)[k])
+      if (r !== null) return r
+    }
+  }
+
+  // 2) Genéricos
+  const generic = ["funding_rate", "fundingRate", "rate", "value"]
+  for (const k of Object.keys(obj)) {
+    if (generic.includes(k)) {
+      const r = coerceRate((obj as any)[k])
+      if (r !== null) return r
+    }
+  }
+
+  // 3) Predicted/next (último recurso)
+  const predicted = ["predictedfundingrate", "predictedFundingRate", "nextFundingRate"]
+  for (const k of Object.keys(obj)) {
+    if (predicted.includes(k)) {
+      const r = coerceRate((obj as any)[k])
+      if (r !== null) return r
+    }
   }
 
   return null
 }
 
-function isProbableSymbolKey(k: string): boolean {
-  return SYMBOL_KEYS.some((x) => k.toLowerCase().includes(x))
-}
-
-function isProbablePlatformKey(k: string): boolean {
-  return PLATFORM_KEYS.some((x) => k.toLowerCase().includes(x))
-}
-
-function isProbableRateKey(k: string): boolean {
-  const kLower = k.toLowerCase()
-  return (
-    FUND_KEYS.some((x) => kLower.includes(x)) ||
-    (kLower.includes("fund") && !kLower.includes("index") && !kLower.includes("time"))
-  )
-}
-
 function* traverse(node: any, pathKeys: string[] = []): Generator<[any, string[]]> {
   if (typeof node === "object" && node !== null && !Array.isArray(node)) {
     yield [node, pathKeys]
-    for (const [k, v] of Object.entries(node)) {
-      yield* traverse(v, [...pathKeys, k])
-    }
+    for (const [k, v] of Object.entries(node)) yield* traverse(v, [...pathKeys, k])
   } else if (Array.isArray(node)) {
-    for (const [idx, v] of node.entries()) {
-      yield* traverse(v, [...pathKeys, idx.toString()])
-    }
+    for (const [idx, v] of node.entries()) yield* traverse(v, [...pathKeys, idx.toString()])
   }
 }
 
@@ -116,24 +141,21 @@ function extractRecord(d: any, pathKeys: string[]): [string | null, string | nul
   let symbol: string | null = null
   let rate: number | null = null
 
-  // 1) Direct extraction
+  // Plataforma y símbolo por clave directa
   for (const [k, v] of Object.entries(d)) {
     if (typeof v === "string") {
-      if (isProbablePlatformKey(k) && !platform) {
-        platform = normPlatformLabel(v)
-      }
-      if (isProbableSymbolKey(k) && !symbol) {
-        symbol = v
-      }
+      if (isProbablePlatformKey(k) && !platform) platform = normPlatformLabel(v)
+      if (isProbableSymbolKey(k) && !symbol) symbol = v
     }
+    // Posible rate directo
     if ((typeof v === "number" || typeof v === "string") && isProbableRateKey(k) && rate === null) {
       rate = coerceRate(v)
     }
   }
 
-  // 2) Platform from path
+  // Plataforma derivada del path
   if (!platform) {
-    for (const key of pathKeys.reverse()) {
+    for (const key of [...pathKeys].reverse()) {
       const guess = normPlatformLabel(key)
       if (guess) {
         platform = guess
@@ -142,7 +164,7 @@ function extractRecord(d: any, pathKeys: string[]): [string | null, string | nul
     }
   }
 
-  // 3) Nested symbol
+  // Símbolo anidado
   if (!symbol) {
     for (const v of Object.values(d)) {
       if (typeof v === "object" && v !== null) {
@@ -157,17 +179,18 @@ function extractRecord(d: any, pathKeys: string[]): [string | null, string | nul
     }
   }
 
-  // 4) Nested rate
+  // Rate con prioridad (objeto actual)
+  if (rate === null) rate = pickRate(d)
+
+  // Rate anidado (fallback)
   if (rate === null) {
     for (const v of Object.values(d)) {
       if (typeof v === "object" && v !== null) {
-        for (const [kk, vv] of Object.entries(v)) {
-          if (isProbableRateKey(kk) && (typeof vv === "number" || typeof vv === "string")) {
-            rate = coerceRate(vv)
-            if (rate !== null) break
-          }
+        const r = pickRate(v)
+        if (r !== null) {
+          rate = r
+          break
         }
-        if (rate !== null) break
       }
     }
   }
@@ -176,96 +199,61 @@ function extractRecord(d: any, pathKeys: string[]): [string | null, string | nul
   return [platform, base, rate]
 }
 
+// --- Fetch agregador (Hyperliquid + Lighter) ---
 async function fetchAgg(): Promise<[Record<string, Record<string, number>>, string[]]> {
   const byBase: Record<string, Record<string, number>> = {}
   const basesLighter: string[] = []
 
-  try {
-    console.log("[v0] Fetching aggregator data from:", API_AGG)
-    const response = await fetch(API_AGG, {
-      headers: { "User-Agent": "funding-triplet/1.1" },
-      cache: "no-store",
-      next: { revalidate: 0 },
-    })
+  console.log("[v0] Fetching aggregator data from:", API_AGG)
+  const response = await fetch(API_AGG, {
+    headers: { "User-Agent": "funding-triplet/1.1" },
+    cache: "no-store",
+    next: { revalidate: 0 },
+  })
+  if (!response.ok) throw new Error(`Aggregator API failed: ${response.status}`)
 
-    if (!response.ok) {
-      throw new Error(`Aggregator API failed: ${response.status}`)
-    }
+  const data = await response.json()
+  console.log("[v0] Aggregator response received")
 
-    const data = await response.json()
-    console.log("[v0] Aggregator response received")
+  for (const [node, path] of traverse(data)) {
+    if (typeof node !== "object" || node === null) continue
+    const [plat, base, rateRaw] = extractRecord(node, path)
 
-    for (const [node, path] of traverse(data)) {
-      if (typeof node !== "object" || node === null) continue
+    if (!plat || !["Lighter", "Hyperliquid"].includes(plat) || !base) continue
+    const rate = normalizePerHour(plat, rateRaw)
+    if (rate === null) continue
 
-      const [plat, base, rate] = extractRecord(node, path)
+    if (!byBase[base]) byBase[base] = {}
+    byBase[base][plat] = rate
 
-      if (!plat || !["Lighter", "Hyperliquid"].includes(plat) || !base || rate === null) {
-        continue
-      }
-
-      if (!byBase[base]) byBase[base] = {}
-      byBase[base][plat] = rate
-
-      if (plat === "Lighter" && !basesLighter.includes(base)) {
-        basesLighter.push(base)
-      }
-    }
-
-    console.log("[v0] Parsed aggregator data:", Object.keys(byBase).length, "assets")
-    return [byBase, basesLighter]
-  } catch (error) {
-    console.error("[v0] Error fetching aggregator:", error)
-    throw error
+    if (plat === "Lighter" && !basesLighter.includes(base)) basesLighter.push(base)
   }
+
+  console.log("[v0] Parsed aggregator data:", Object.keys(byBase).length, "assets")
+  return [byBase, basesLighter]
 }
 
-function parseTs(tsVal: any): number | null {
-  if (tsVal === null || tsVal === undefined) return null
-
-  if (typeof tsVal === "number") {
-    const x = tsVal
-    return x > 1e12 ? x / 1000.0 : x
-  }
-
-  if (typeof tsVal === "string") {
-    try {
-      let s = tsVal.trim()
-      if (s.endsWith("Z")) s = s.slice(0, -1) + "+00:00"
-      return new Date(s).getTime() / 1000
-    } catch {
-      return null
-    }
-  }
-
-  return null
-}
-
+// --- Paradex helpers ---
 function extractParadexLatest(payload: any): number | null {
   let items: any[] | null = null
-
-  if (Array.isArray(payload)) {
-    items = payload
-  } else if (typeof payload === "object" && payload !== null) {
-    items = payload.data || payload.results || payload.items
-  }
-
+  if (Array.isArray(payload)) items = payload
+  else if (payload && typeof payload === "object") items = payload.data || payload.results || payload.items
   if (!Array.isArray(items) || items.length === 0) return null
 
-  const lastItem = items[items.length - 1]
+  const last = items[items.length - 1]
+  if (!last || typeof last !== "object") return null
 
-  if (typeof lastItem !== "object" || lastItem === null) return null
+  // Prioridad: hourly_funding_rate > funding_rate (8h)
+  const hourly = last.hourly_funding_rate ?? last.fundingRateHour ?? null
+  const eightH = last.funding_rate ?? last.fundingRate ?? null
 
-  const rateRaw = lastItem.funding_rate || lastItem.fundingRate || lastItem.hourly_funding_rate
-  let rate: number | null = null
-
-  try {
-    rate = rateRaw !== null && rateRaw !== undefined ? Number.parseFloat(rateRaw) : null
-  } catch {
-    rate = null
+  let r: number | null = null
+  if (hourly != null) r = coerceRate(hourly)
+  else if (eightH != null) {
+    const raw = coerceRate(eightH)
+    r = raw == null ? null : raw / 8 // normaliza 8h -> 1h
   }
-
-  return rate
+  return r
 }
 
 async function fetchParadexLatestForBase(base: string, quotes: string[]): Promise<number | null> {
@@ -285,44 +273,36 @@ async function fetchParadexLatestForBase(base: string, quotes: string[]): Promis
       if (!response.ok) continue
 
       const data = await response.json()
-      const rate = extractParadexLatest(data)
-
-      if (rate !== null) {
-        console.log("[v0] Found Paradex rate for", mkt, ":", rate)
-        return rate
-      }
+      const hourlyRate = extractParadexLatest(data) // ya viene /hr
+      if (hourlyRate !== null) return hourlyRate
     } catch (error) {
       console.log("[v0] Paradex error for", mkt, ":", error)
       continue
     }
   }
-
   return null
 }
 
 async function fetchParadexBatch(bases: string[], quotes: string[], batchSize = 10): Promise<Record<string, number>> {
   const results: Record<string, number> = {}
 
-  // Process bases in batches to avoid overwhelming the API
   for (let i = 0; i < bases.length; i += batchSize) {
     const batch = bases.slice(i, i + batchSize)
     console.log(
-      `[v0] Processing Paradex batch ${Math.floor(i / batchSize) + 1}/${Math.ceil(bases.length / batchSize)} (${batch.length} assets)`,
+      `[v0] Processing Paradex batch ${Math.floor(i / batchSize) + 1}/${Math.ceil(
+        bases.length / batchSize,
+      )} (${batch.length} assets)`,
     )
 
-    // Process batch in parallel with timeout
     const batchPromises = batch.map(async (base) => {
       try {
-        const timeoutPromise = new Promise<number | null>(
-          (_, reject) => setTimeout(() => reject(new Error("Timeout")), 5000), // 5 second timeout per request
+        const timeoutPromise = new Promise<number | null>((_, reject) =>
+          setTimeout(() => reject(new Error("Timeout")), 5000),
         )
-
         const fetchPromise = fetchParadexLatestForBase(base, quotes)
         const rate = await Promise.race([fetchPromise, timeoutPromise])
 
-        if (rate !== null) {
-          results[base] = rate
-        }
+        if (rate !== null) results[base] = rate
         return { base, rate }
       } catch (error) {
         console.log(`[v0] Paradex timeout/error for ${base}:`, error instanceof Error ? error.message : "Unknown error")
@@ -331,33 +311,31 @@ async function fetchParadexBatch(bases: string[], quotes: string[], batchSize = 
     })
 
     await Promise.all(batchPromises)
-
-    // Small delay between batches to be respectful to the API
-    if (i + batchSize < bases.length) {
-      await new Promise((resolve) => setTimeout(resolve, 100))
-    }
+    if (i + batchSize < bases.length) await new Promise((r) => setTimeout(r, 100))
   }
 
   return results
 }
 
+// --- Handler ---
 export async function GET() {
   try {
     console.log("[v0] Starting funding fees collection")
 
-    // 1) Fetch Hyperliquid + Lighter data
+    // 1) Hyperliquid + Lighter del agregador
     const [byBase, basesLighter] = await fetchAgg()
 
-    // 2) Fetch Paradex data in parallel batches
+    // 2) Paradex en lotes (normalizado a /hr en extract)
     const quotes = ["USD", "USDC"]
     const allBases = basesLighter
-
     console.log(`[v0] Fetching Paradex data for ${allBases.length} assets in parallel batches`)
-    const paradexResults = await fetchParadexBatch(allBases, quotes, 10) // Process 10 at a time
+    const paradexResults = await fetchParadexBatch(allBases, quotes, 10)
 
-    // 3) Merge Paradex results
+    // 3) Merge Paradex
     for (const [base, rate] of Object.entries(paradexResults)) {
+      if (rate == null) continue
       if (!byBase[base]) byBase[base] = {}
+      // (ya es /hr)
       byBase[base]["Paradex"] = rate
     }
 
