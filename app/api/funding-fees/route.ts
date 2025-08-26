@@ -1,7 +1,11 @@
+// app/api/funding/route.ts
 import { NextResponse } from "next/server"
 
+// 👇 Fuerza ejecución en runtime Node, sin ISR ni caché (prod y dev)
+export const runtime = "nodejs"
 export const dynamic = "force-dynamic"
-export const revalidate = 3600 // Cache for 1 hour
+export const revalidate = 0
+export const fetchCache = "force-no-store"
 
 interface FundingData {
   [asset: string]: {
@@ -15,7 +19,6 @@ interface ApiResponse {
   data: FundingData
   timestamp: string
   totalAssets: number
-  note?: string
 }
 
 const API_AGG = "https://mainnet.zklighter.elliot.ai/api/v1/funding-rates"
@@ -181,6 +184,8 @@ async function fetchAgg(): Promise<[Record<string, Record<string, number>>, stri
     console.log("[v0] Fetching aggregator data from:", API_AGG)
     const response = await fetch(API_AGG, {
       headers: { "User-Agent": "funding-triplet/1.1" },
+      cache: "no-store",
+      next: { revalidate: 0 },
     })
 
     if (!response.ok) {
@@ -272,6 +277,8 @@ async function fetchParadexLatestForBase(base: string, quotes: string[]): Promis
       console.log("[v0] Fetching Paradex data for:", mkt)
       const response = await fetch(url, {
         headers: { "User-Agent": "funding-triplet/1.1" },
+        cache: "no-store",
+        next: { revalidate: 0 },
       })
 
       if (response.status === 404) continue
@@ -336,24 +343,6 @@ async function fetchParadexBatch(bases: string[], quotes: string[], batchSize = 
 
 export async function GET() {
   try {
-    if (process.env.NODE_ENV === "production" && process.env.VERCEL !== "1") {
-      // Return sample data for Firebase static hosting
-      const sampleData: FundingData = {
-        BTC: { Hyperliquid: 0.0001, Lighter: 0.00012, Paradex: 0.00015 },
-        ETH: { Hyperliquid: 0.0002, Lighter: 0.00018, Paradex: 0.00022 },
-        SOL: { Hyperliquid: 0.0003, Lighter: null, Paradex: 0.00025 },
-        AVAX: { Hyperliquid: 0.0001, Lighter: 0.00015, Paradex: null },
-        LINK: { Hyperliquid: 0.0002, Lighter: 0.00019, Paradex: 0.00021 },
-      }
-
-      return NextResponse.json({
-        data: sampleData,
-        timestamp: new Date().toISOString(),
-        totalAssets: Object.keys(sampleData).length,
-        note: "Sample data - Deploy to Vercel for real-time data",
-      })
-    }
-
     console.log("[v0] Starting funding fees collection")
 
     // 1) Fetch Hyperliquid + Lighter data
@@ -379,7 +368,9 @@ export async function GET() {
     }
 
     console.log("[v0] Successfully collected funding data for", response.totalAssets, "assets")
-    return NextResponse.json(response)
+    return NextResponse.json(response, {
+      headers: { "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0" },
+    })
   } catch (error) {
     console.error("[v0] API route error:", error)
     return NextResponse.json(
@@ -387,7 +378,10 @@ export async function GET() {
         error: "Failed to fetch funding data",
         details: error instanceof Error ? error.message : "Unknown error",
       },
-      { status: 500 },
+      {
+        status: 500,
+        headers: { "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0" },
+      },
     )
   }
 }
