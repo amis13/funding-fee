@@ -292,11 +292,11 @@ export default function FundingFeesPage() {
           {totalAssets > 0 && <Badge variant="outline">{totalAssets} assets</Badge>}
           <Badge variant="outline" className="flex items-center gap-1">
             <Clock className="h-3 w-3" />
-            Auto-refresh: Every hour
+            1h Funding Rate
           </Badge>
           <Badge variant="outline" className="flex items-center gap-1">
             <Zap className="h-3 w-3" />
-            Optimized parallel loading
+            Current instant rate
           </Badge>
         </div>
 
@@ -309,7 +309,7 @@ export default function FundingFeesPage() {
                   <span className="text-muted-foreground">{Math.round(loadingProgress)}%</span>
                 </div>
                 <Progress value={loadingProgress} className="h-2" />
-                <p className="text-xs text-muted-foreground">1h Funding Rate</p>
+                <p className="text-xs text-muted-foreground">Loading 1h Funding Rates...</p>
               </div>
             </CardContent>
           </Card>
@@ -322,7 +322,7 @@ export default function FundingFeesPage() {
           <CardHeader>
             <CardTitle>Top 5 cross-venue discrepancies</CardTitle>
             <CardDescription>
-              Activos con mayor diferencia de funding entre plataformas (priorizando signos opuestos para delta-neutral).
+              Assets with the largest funding difference between platforms (prioritizing opposite signs for delta-neutral).
             </CardDescription>
           </CardHeader>
           <CardContent>
@@ -391,8 +391,8 @@ export default function FundingFeesPage() {
               </table>
             </div>
             <p className="mt-3 text-xs text-muted-foreground">
-              Sugerencia: <strong>Long</strong> donde el funding es negativo y <strong>Short</strong> donde es positivo.
-              Verifica liquidez, fees y límites de borrow antes de ejecutar cualquier estrategia.
+              Suggestion: <strong>Go Long</strong> where the funding is negative and <strong>Go Short</strong> where it is positive.
+              Check liquidity, fees, and borrow limits before executing any strategy.
             </p>
           </CardContent>
         </Card>
