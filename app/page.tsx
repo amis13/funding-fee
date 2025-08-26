@@ -256,7 +256,7 @@ export default function FundingFeesPage() {
                 </div>
                 <Progress value={loadingProgress} className="h-2" />
                 <p className="text-xs text-muted-foreground">
-                  Using parallel processing to fetch data from multiple exchanges simultaneously
+                  1h Funding
                 </p>
               </div>
             </CardContent>
